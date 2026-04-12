@@ -1,71 +1,263 @@
+import hashlib
 import logging
 import time
+import uuid
+
+from cachetools import TTLCache
 
 from app.config import settings
-from app.db.schema import get_schema, get_schema_text
-from app.llm.prompts import get_prompt_template, build_few_shot_examples
+from app.db.schema import get_schema, get_schema_text, filter_schema_for_query
+from app.llm.prompts import get_prompt_template, build_few_shot_examples, build_error_feedback_prompt
 from app.llm.model import generate
+from app.metadata.loader import get_metadata, get_synonyms
+from app.metadata.semantic import classify_intent, reorder_examples_by_intent, build_semantic_schema_text
+from app.metrics import metrics
 from app.query.generator import extract_sql
 from app.query.validator import validate_sql
 from app.query.executor import execute
 
 logger = logging.getLogger(__name__)
 
+# Simple in-memory cache for query results
+_cache: TTLCache = TTLCache(
+    maxsize=settings.cache_max_size,
+    ttl=settings.cache_ttl_seconds,
+)
 
-async def process_query(user_query: str) -> dict:
+
+def _cache_key(user_query: str) -> str:
+    return hashlib.sha256(user_query.strip().lower().encode()).hexdigest()
+
+
+async def process_query(user_query: str, request_id: str | None = None, debug: bool = False) -> dict:
     """
-    NL-to-SQL pipeline:
-    1. Build prompt with schema + few-shot examples + user query
-    2. Single LLM call → SQL
-    3. Validate SQL against schema
-    4. Execute query
-    5. Return structured response
+    NL-to-SQL pipeline with retry, schema filtering, and caching.
+
+    1. Check cache
+    2. Filter schema to relevant tables
+    3. Build prompt with filtered schema + FK-based examples
+    4. Generate SQL with retry loop (re-prompt with error feedback on failure)
+    5. Validate SQL against full schema
+    6. Execute query with timeout
+    7. Cache and return result
+
+    If debug=True, attaches a 'trace' dict with full pipeline internals.
     """
+    if request_id is None:
+        request_id = str(uuid.uuid4())[:8]
+
     t0 = time.time()
+    log_ctx = f"[{request_id}]"
+    metrics.record_query()
+
+    trace = {} if debug else None
+
+    def _t(key, value):
+        if trace is not None:
+            trace[key] = value
+
+    _t("request_id", request_id)
+    _t("user_query", user_query)
+
+    # Check cache
+    cache_key = _cache_key(user_query)
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        logger.info("%s Cache hit for query: %s", log_ctx, user_query)
+        metrics.record_cache_hit()
+        _t("cache_hit", True)
+        result = {**cached, "request_id": request_id}
+        if trace is not None:
+            result["trace"] = trace
+        return result
+
+    _t("cache_hit", False)
+
     schema = get_schema()
-    schema_text = get_schema_text()
 
     if not schema:
-        return {"sql": None, "data": None, "explanation": None, "error": "No database schema loaded."}
+        result = {
+            "request_id": request_id,
+            "sql": None,
+            "data": None,
+            "explanation": None,
+            "error": "No database schema loaded.",
+        }
+        if trace is not None:
+            result["trace"] = trace
+        return result
 
-    # Build few-shot examples from actual schema
-    examples = build_few_shot_examples(schema, settings.db_dialect)
+    # Filter schema to relevant tables (with synonym support)
+    synonyms = get_synonyms()
+    filtered_schema_typed, filtered_rels = filter_schema_for_query(user_query, synonyms=synonyms)
 
-    # Step 1: Direct NL → SQL via single LLM call
-    try:
-        prompt_template = get_prompt_template(settings.db_dialect)
-        prompt = prompt_template.format(
-            schema=schema_text,
-            examples=examples,
-            user_query=user_query,
+    _t("filtered_tables", {
+        table: [col_name for col_name, _ in cols]
+        for table, cols in filtered_schema_typed.items()
+    })
+    _t("filtered_relationships", filtered_rels)
+
+    # Build semantic schema text (enriched with metadata if available)
+    metadata = get_metadata()
+    if metadata:
+        filtered_schema_text = build_semantic_schema_text(
+            filtered_schema_typed, filtered_rels, metadata=metadata,
         )
-        logger.info("Generating SQL for: %s", user_query)
-        raw = generate(prompt, max_tokens=256, temperature=0.1)
-        sql = extract_sql(raw)
-        logger.info("Generated SQL: %s", sql)
-    except Exception as e:
-        logger.error("SQL generation failed: %s", e)
-        return {"sql": None, "data": None, "explanation": None, "error": f"Failed to generate SQL: {e}"}
+    else:
+        filtered_schema_text = get_schema_text(filtered_schema_typed, filtered_rels)
 
-    # Step 2: Validate SQL
-    is_valid, error_msg, sql = validate_sql(sql, schema)
-    if not is_valid:
-        logger.warning("SQL validation failed: %s | SQL: %s", error_msg, sql)
-        return {"sql": sql, "data": None, "explanation": None, "error": f"SQL validation failed: {error_msg}"}
+    _t("schema_text", filtered_schema_text)
 
-    # Step 3: Execute
+    # Classify intent
+    intent = classify_intent(user_query, table_names=list(filtered_schema_typed.keys()))
+    logger.info("%s Intent: %s", log_ctx, intent)
+    _t("intent", intent)
+
+    # Build filtered plain schema for few-shot examples (table -> column names)
+    filtered_schema_plain = {
+        table: [col_name for col_name, _ in cols]
+        for table, cols in filtered_schema_typed.items()
+    }
+
+    # Build few-shot examples from filtered schema with actual FK relationships
+    examples = build_few_shot_examples(
+        filtered_schema_plain, filtered_rels, settings.db_dialect
+    )
+    examples = reorder_examples_by_intent(examples, intent)
+    _t("few_shot_examples", examples)
+
+    # Generate SQL with retry loop
+    sql = None
+    last_error = None
+    attempts_trace = []
+
+    for attempt in range(1, settings.llm_max_retries + 1):
+        attempt_info = {"attempt": attempt}
+        try:
+            prompt_template = get_prompt_template(settings.db_dialect)
+            prompt = prompt_template.format(
+                schema=filtered_schema_text,
+                examples=examples,
+                user_query=user_query,
+            )
+
+            # On retry, append error feedback
+            if last_error and attempt > 1:
+                prompt = build_error_feedback_prompt(prompt, last_error)
+                logger.info(
+                    "%s Retry %d/%d with error feedback",
+                    log_ctx, attempt, settings.llm_max_retries,
+                )
+
+            temperature = min(0.1 + (attempt - 1) * 0.1, 0.5)
+            attempt_info["temperature"] = temperature
+            attempt_info["prompt"] = prompt
+
+            logger.info(
+                "%s Generating SQL (attempt %d) for: %s",
+                log_ctx, attempt, user_query,
+            )
+            raw = generate(prompt, max_tokens=256, temperature=temperature)
+            attempt_info["raw_llm_response"] = raw
+
+            sql = extract_sql(raw)
+            attempt_info["extracted_sql"] = sql
+            logger.info("%s Generated SQL: %s", log_ctx, sql)
+
+            # Validate SQL against full schema
+            is_valid, error_msg, sql = validate_sql(sql, schema)
+            attempt_info["validation_passed"] = is_valid
+            attempt_info["validation_error"] = error_msg
+            attempt_info["final_sql"] = sql
+
+            if is_valid:
+                if trace is not None:
+                    attempts_trace.append(attempt_info)
+                break
+            else:
+                last_error = error_msg
+                metrics.record_retry()
+                logger.warning(
+                    "%s Validation failed (attempt %d): %s | SQL: %s",
+                    log_ctx, attempt, error_msg, sql,
+                )
+                if trace is not None:
+                    attempts_trace.append(attempt_info)
+                if attempt == settings.llm_max_retries:
+                    metrics.record_validation_failure()
+                    _t("attempts", attempts_trace)
+                    result = {
+                        "request_id": request_id,
+                        "sql": sql,
+                        "data": None,
+                        "explanation": None,
+                        "error": f"SQL validation failed after {attempt} attempts: {error_msg}",
+                    }
+                    if trace is not None:
+                        result["trace"] = trace
+                    return result
+
+        except Exception as e:
+            last_error = str(e)
+            attempt_info["exception"] = str(e)
+            metrics.record_retry()
+            logger.error("%s Generation attempt %d failed: %s", log_ctx, attempt, e)
+            if trace is not None:
+                attempts_trace.append(attempt_info)
+            if attempt == settings.llm_max_retries:
+                metrics.record_generation_failure()
+                _t("attempts", attempts_trace)
+                result = {
+                    "request_id": request_id,
+                    "sql": None,
+                    "data": None,
+                    "explanation": None,
+                    "error": f"Failed to generate SQL after {attempt} attempts: {e}",
+                }
+                if trace is not None:
+                    result["trace"] = trace
+                return result
+
+    _t("attempts", attempts_trace)
+
+    # Execute
     try:
-        logger.info("Executing SQL")
+        logger.info("%s Executing SQL", log_ctx)
         data = await execute(sql)
+        _t("execution_success", True)
     except RuntimeError as e:
-        return {"sql": sql, "data": None, "explanation": None, "error": str(e)}
+        metrics.record_execution_failure()
+        _t("execution_success", False)
+        _t("execution_error", str(e))
+        result = {
+            "request_id": request_id,
+            "sql": sql,
+            "data": None,
+            "explanation": None,
+            "error": str(e),
+        }
+        if trace is not None:
+            result["trace"] = trace
+        return result
 
     elapsed = round(time.time() - t0, 2)
-    logger.info("Pipeline completed in %.2fs", elapsed)
+    metrics.record_success(elapsed)
+    logger.info("%s Pipeline completed in %.2fs", log_ctx, elapsed)
+    _t("elapsed_seconds", elapsed)
 
-    return {
+    result = {
+        "request_id": request_id,
         "sql": sql,
         "data": data,
         "explanation": f"Query returned {len(data['rows'])} row(s) in {elapsed}s.",
         "error": None,
     }
+
+    if trace is not None:
+        result["trace"] = trace
+
+    # Cache the result (without trace)
+    cache_result = {k: v for k, v in result.items() if k != "trace"}
+    _cache[cache_key] = cache_result
+
+    return result

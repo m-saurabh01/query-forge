@@ -1,3 +1,5 @@
+import asyncio
+
 import aiomysql
 import logging
 
@@ -30,17 +32,34 @@ def get_pool() -> aiomysql.Pool:
     return _pool
 
 
-async def execute_query(sql: str) -> dict:
+async def execute_query(sql: str, timeout: int | None = None) -> dict:
+    if timeout is None:
+        timeout = settings.query_timeout_seconds
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(sql)
+            try:
+                await asyncio.wait_for(cur.execute(sql), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise RuntimeError(f"Query execution timed out after {timeout}s")
             columns = [desc[0] for desc in cur.description] if cur.description else []
             rows = await cur.fetchall()
             return {
                 "columns": columns,
                 "rows": [list(row) for row in rows],
             }
+
+
+async def check_connection() -> bool:
+    """Check if database connection is healthy."""
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+                return True
+    except Exception:
+        return False
 
 
 async def close_pool():

@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NL-to-SQL Developer Console</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 14px; font-weight: 600; color: var(--accent); }
+  header .badge { font-size: 11px; background: var(--border); color: var(--muted); padding: 2px 8px; border-radius: 10px; }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+  /* Query input */
+  .query-bar { display: flex; gap: 8px; margin-bottom: 20px; }
+  .query-bar input {
+    flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 14px; color: var(--text); font-family: inherit; font-size: 13px; outline: none;
+  }
+  .query-bar input:focus { border-color: var(--accent); }
+  .query-bar button {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 10px 20px;
+    font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .query-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .query-bar button:hover:not(:disabled) { filter: brightness(1.1); }
+
+  /* Pipeline steps */
+  .pipeline { display: flex; flex-direction: column; gap: 2px; }
+  .step {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  }
+  .step-header {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer;
+    user-select: none; border-bottom: 1px solid transparent;
+  }
+  .step-header:hover { background: rgba(88,166,255,0.04); }
+  .step.open .step-header { border-bottom-color: var(--border); }
+  .step-number {
+    width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; flex-shrink: 0;
+    background: var(--border); color: var(--muted);
+  }
+  .step.done .step-number { background: var(--green); color: #fff; }
+  .step.error .step-number { background: var(--red); color: #fff; }
+  .step.active .step-number { background: var(--accent); color: #fff; }
+  .step-title { font-size: 13px; font-weight: 600; flex: 1; }
+  .step-badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    background: var(--border); color: var(--muted);
+  }
+  .step.done .step-badge { background: rgba(63,185,80,0.15); color: var(--green); }
+  .step.error .step-badge { background: rgba(248,81,73,0.15); color: var(--red); }
+  .step-arrow { color: var(--muted); font-size: 12px; transition: transform 0.2s; }
+  .step.open .step-arrow { transform: rotate(90deg); }
+  .step-body { display: none; padding: 14px; }
+  .step.open .step-body { display: block; }
+
+  /* Content blocks */
+  pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    padding: 12px; font-size: 12px; line-height: 1.6; overflow-x: auto;
+    white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto;
+  }
+  .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  .tag {
+    background: rgba(88,166,255,0.1); color: var(--accent); font-size: 12px;
+    padding: 3px 10px; border-radius: 4px; border: 1px solid rgba(88,166,255,0.2);
+  }
+  .tag.col { background: rgba(188,140,255,0.1); color: var(--purple); border-color: rgba(188,140,255,0.2); }
+
+  .kv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .kv-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .kv-table td:first-child { color: var(--muted); white-space: nowrap; width: 140px; }
+
+  .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 12px 0 6px; }
+  .label:first-child { margin-top: 0; }
+
+  /* Retry timeline*/
+  .attempt-card {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 12px; margin-bottom: 8px;
+  }
+  .attempt-card .attempt-head {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .attempt-card .attempt-num {
+    font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px;
+  }
+  .attempt-card.pass .attempt-num { background: rgba(63,185,80,0.15); color: var(--green); }
+  .attempt-card.fail .attempt-num { background: rgba(248,81,73,0.15); color: var(--red); }
+
+  .sql-highlight { color: var(--green); }
+  .error-text { color: var(--red); font-size: 12px; }
+
+  /* Result table */
+  .result-table-wrap { max-height: 300px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; }
+  .result-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .result-table th {
+    background: var(--surface); position: sticky; top: 0; padding: 6px 10px;
+    text-align: left; border-bottom: 1px solid var(--border); color: var(--accent); font-weight: 600;
+  }
+  .result-table td { padding: 5px 10px; border-bottom: 1px solid var(--border); }
+  .result-table tr:hover td { background: rgba(88,166,255,0.04); }
+
+  .connector { text-align: center; color: var(--border); font-size: 16px; line-height: 1; }
+
+  #loading { display: none; text-align: center; padding: 40px; color: var(--muted); }
+  #loading.show { display: block; }
+  .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #empty-state { text-align: center; padding: 60px 20px; color: var(--muted); }
+  #empty-state p { font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>NL-to-SQL Developer Console</h1>
+  <span class="badge">DEBUG MODE</span>
+</header>
+
+<div class="container">
+  <div class="query-bar">
+    <input type="text" id="queryInput" placeholder="Enter natural language query..." autofocus>
+    <button id="runBtn" onclick="runDebugQuery()">Run Debug</button>
+  </div>
+
+  <div id="empty-state">
+    <p>Enter a query above to see the full pipeline trace</p>
+  </div>
+
+  <div id="loading"><div class="spinner"></div><p style="margin-top:12px">Running pipeline...</p></div>
+
+  <div id="pipeline" class="pipeline" style="display:none"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+$('queryInput').addEventListener('keydown', e => { if (e.key === 'Enter') runDebugQuery(); });
+
+async function runDebugQuery() {
+  const query = $('queryInput').value.trim();
+  if (!query) return;
+
+  $('empty-state').style.display = 'none';
+  $('pipeline').style.display = 'none';
+  $('loading').classList.add('show');
+  $('runBtn').disabled = true;
+
+  try {
+    const res = await fetch('/api/query/debug', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    const data = await res.json();
+    renderPipeline(data);
+  } catch (err) {
+    $('pipeline').innerHTML = `<div class="step error open"><div class="step-header"><span class="step-number">!</span><span class="step-title">Request Failed</span></div><div class="step-body"><p class="error-text">${esc(err.message)}</p></div></div>`;
+    $('pipeline').style.display = 'flex';
+  } finally {
+    $('loading').classList.remove('show');
+    $('runBtn').disabled = false;
+  }
+}
+
+function esc(s) {
+  if (s == null) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+function renderPipeline(data) {
+  const t = data.trace || {};
+  const attempts = t.attempts || [];
+  const hasError = !!data.error;
+  const lastAttempt = attempts[attempts.length - 1];
+
+  let steps = [];
+
+  // Step 1: Query Input
+  steps.push(makeStep(1, 'Query Input', 'done', `
+    <table class="kv-table">
+      <tr><td>User Query</td><td>${esc(t.user_query || data.sql || '')}</td></tr>
+      <tr><td>Request ID</td><td>${esc(t.request_id || data.request_id || '')}</td></tr>
+      <tr><td>Cache Hit</td><td>${t.cache_hit ? '<span style="color:var(--green)">Yes</span>' : '<span style="color:var(--muted)">No</span>'}</td></tr>
+      ${t.intent ? `<tr><td>Intent</td><td><span class="tag">${esc(t.intent)}</span></td></tr>` : ''}
+    </table>
+  `, true));
+
+  // Step 2: Schema Filtering
+  if (t.filtered_tables) {
+    const tables = Object.keys(t.filtered_tables);
+    let body = `<div class="label">Tables Selected (${tables.length})</div><div class="tag-list">`;
+    tables.forEach(tbl => { body += `<span class="tag">${esc(tbl)}</span>`; });
+    body += '</div>';
+
+    tables.forEach(tbl => {
+      const cols = t.filtered_tables[tbl];
+      body += `<div class="label">${esc(tbl)} columns</div><div class="tag-list">`;
+      cols.forEach(c => { body += `<span class="tag col">${esc(c)}</span>`; });
+      body += '</div>';
+    });
+
+    if (t.filtered_relationships && t.filtered_relationships.length > 0) {
+      body += '<div class="label">Relationships</div><pre>';
+      t.filtered_relationships.forEach(r => { body += esc(r) + '\n'; });
+      body += '</pre>';
+    }
+    steps.push(makeStep(2, 'Schema Filtering', 'done', body));
+  }
+
+  // Step 3: Schema Text
+  if (t.schema_text) {
+    steps.push(makeStep(3, 'Schema Text Sent to LLM', 'done', `
+      <div class="label">Schema text (${t.schema_text.length} chars)</div>
+      <pre>${esc(t.schema_text)}</pre>
+    `));
+  }
+
+  // Step 4: Few-Shot Examples
+  if (t.few_shot_examples != null) {
+    steps.push(makeStep(4, 'Few-Shot Examples', 'done', `
+      <pre>${esc(t.few_shot_examples)}</pre>
+    `));
+  }
+
+  // Step 5: LLM Attempts
+  if (attempts.length > 0) {
+    let body = '';
+    attempts.forEach((a, i) => {
+      const passed = a.validation_passed;
+      body += `<div class="attempt-card ${passed ? 'pass' : 'fail'}">`;
+      body += `<div class="attempt-head">`;
+      body += `<span class="attempt-num">${passed ? '✓' : '✗'} Attempt ${a.attempt}</span>`;
+      body += `<span style="color:var(--muted);font-size:11px">temp=${a.temperature}</span>`;
+      body += `</div>`;
+
+      // Prompt (collapsible)
+      if (a.prompt) {
+        const promptId = 'prompt_' + i;
+        body += `<div class="label" style="cursor:pointer" onclick="toggleBlock('${promptId}')">Full Prompt ▸ (${a.prompt.length} chars)</div>`;
+        body += `<pre id="${promptId}" style="display:none">${esc(a.prompt)}</pre>`;
+      }
+
+      if (a.raw_llm_response != null) {
+        body += `<div class="label">Raw LLM Response</div><pre>${esc(a.raw_llm_response)}</pre>`;
+      }
+      if (a.extracted_sql) {
+        body += `<div class="label">Extracted SQL</div><pre class="sql-highlight">${esc(a.extracted_sql)}</pre>`;
+      }
+      if (a.final_sql && a.final_sql !== a.extracted_sql) {
+        body += `<div class="label">Final SQL (after validation fix)</div><pre class="sql-highlight">${esc(a.final_sql)}</pre>`;
+      }
+      if (a.validation_error) {
+        body += `<div class="label">Validation Error</div><p class="error-text">${esc(a.validation_error)}</p>`;
+      }
+      if (a.exception) {
+        body += `<div class="label">Exception</div><p class="error-text">${esc(a.exception)}</p>`;
+      }
+      body += '</div>';
+    });
+
+    const allPassed = lastAttempt && lastAttempt.validation_passed;
+    steps.push(makeStep(5, `LLM Generation (${attempts.length} attempt${attempts.length > 1 ? 's' : ''})`,
+      allPassed ? 'done' : 'error', body, true));
+  }
+
+  // Step 6: Execution
+  if (t.execution_success != null) {
+    const ok = t.execution_success;
+    let body = '';
+    if (ok && data.data) {
+      const d = data.data;
+      body += `<table class="kv-table">
+        <tr><td>Rows</td><td>${d.rows ? d.rows.length : 0}</td></tr>
+        <tr><td>Time</td><td>${t.elapsed_seconds || '?'}s</td></tr>
+      </table>`;
+      if (d.columns && d.rows && d.rows.length > 0) {
+        body += '<div class="label">Results</div><div class="result-table-wrap"><table class="result-table"><thead><tr>';
+        d.columns.forEach(c => { body += `<th>${esc(c)}</th>`; });
+        body += '</tr></thead><tbody>';
+        d.rows.forEach(row => {
+          body += '<tr>';
+          row.forEach(v => { body += `<td>${esc(v)}</td>`; });
+          body += '</tr>';
+        });
+        body += '</tbody></table></div>';
+      }
+    } else {
+      body += `<p class="error-text">${esc(t.execution_error || data.error)}</p>`;
+    }
+    steps.push(makeStep(6, 'Execution', ok ? 'done' : 'error', body, true));
+  } else if (hasError) {
+    steps.push(makeStep(6, 'Result', 'error', `<p class="error-text">${esc(data.error)}</p>`, true));
+  }
+
+  // Step 7: Final Output
+  if (data.sql) {
+    steps.push(makeStep(7, 'Final SQL', hasError ? 'error' : 'done', `
+      <pre class="sql-highlight">${esc(data.sql)}</pre>
+      ${data.explanation ? `<p style="color:var(--muted);font-size:12px;margin-top:8px">${esc(data.explanation)}</p>` : ''}
+    `, true));
+  }
+
+  const pipe = $('pipeline');
+  pipe.innerHTML = '';
+  steps.forEach((html, i) => {
+    if (i > 0) {
+      const conn = document.createElement('div');
+      conn.className = 'connector';
+      conn.textContent = '│';
+      pipe.appendChild(conn);
+    }
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    pipe.appendChild(div.firstElementChild);
+  });
+
+  // Add click handlers
+  pipe.querySelectorAll('.step-header').forEach(hdr => {
+    hdr.addEventListener('click', () => hdr.parentElement.classList.toggle('open'));
+  });
+
+  pipe.style.display = 'flex';
+}
+
+function makeStep(num, title, state, bodyHtml, openByDefault) {
+  const cls = `step ${state}${openByDefault ? ' open' : ''}`;
+  const badge = state === 'done' ? 'OK' : state === 'error' ? 'ERR' : '';
+  return `<div class="${cls}">
+    <div class="step-header">
+      <span class="step-number">${num}</span>
+      <span class="step-title">${esc(title)}</span>
+      ${badge ? `<span class="step-badge">${badge}</span>` : ''}
+      <span class="step-arrow">▸</span>
+    </div>
+    <div class="step-body">${bodyHtml}</div>
+  </div>`;
+}
+
+function toggleBlock(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+</script>
+</body>
+</html>

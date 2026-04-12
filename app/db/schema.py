@@ -1,4 +1,5 @@
 import logging
+import re
 
 from app.config import settings
 from app.db.pool import get_pool
@@ -58,13 +59,148 @@ async def load_schema():
     )
 
 
+async def reload_schema():
+    """Reload schema from database (for cache invalidation)."""
+    await load_schema()
+
+
 def get_schema() -> dict[str, list[str]]:
     return _schema
 
 
-def get_schema_text() -> str:
+def get_schema_typed() -> dict[str, list[tuple[str, str]]]:
+    return _schema_typed
+
+
+def get_relationships() -> list[dict]:
+    return _relationships
+
+
+def filter_schema_for_query(
+    user_query: str,
+    synonyms: dict | None = None,
+) -> tuple[dict[str, list[tuple[str, str]]], list[dict]]:
+    """Filter schema to tables relevant to the user's query.
+
+    Args:
+        user_query: The natural language query.
+        synonyms: Optional synonym dict from metadata with keys
+                  "table_synonyms" and "column_synonyms".
+
+    Returns filtered (schema_typed, relationships).
+    If no tables match, returns the full schema as fallback.
+    """
+    if not _schema:
+        return {}, []
+
+    query_lower = user_query.lower()
+    query_words = set(re.findall(r"\w+", query_lower))
+
+    table_syns = synonyms.get("table_synonyms", {}) if synonyms else {}
+    col_syns = synonyms.get("column_synonyms", {}) if synonyms else {}
+
+    # Generic column names that exist in many tables — skip these to avoid
+    # false-positive matches that pull in every table
+    _GENERIC_COLUMNS = {
+        "id", "name", "type", "status", "created_at", "updated_at",
+        "email", "description", "code", "is_read", "is_deleted",
+        "user_id", "email_id",
+    }
+
+    matched_tables: set[str] = set()
+
+    for table in _schema:
+        table_lower = table.lower()
+        # Direct table name match
+        if table_lower in query_lower:
+            matched_tables.add(table)
+            continue
+        # Singular form match (e.g., "email" matches "emails")
+        if table_lower.endswith("s") and table_lower[:-1] in query_words:
+            matched_tables.add(table)
+            continue
+        # Business term / table synonym match
+        for term in table_syns.get(table, []):
+            if term.lower() in query_words:
+                matched_tables.add(table)
+                break
+        if table in matched_tables:
+            continue
+        # Check if any NON-GENERIC column name appears in query
+        for col in _schema[table]:
+            if col.lower() not in _GENERIC_COLUMNS and col.lower() in query_words:
+                matched_tables.add(table)
+                break
+        if table in matched_tables:
+            continue
+        # Column synonym match
+        for col in _schema[table]:
+            key = f"{table}.{col}"
+            for syn in col_syns.get(key, []):
+                if syn.lower() in query_lower:
+                    matched_tables.add(table)
+                    break
+            if table in matched_tables:
+                break
+        if table in matched_tables:
+            continue
+        # Check column hints for semantic matches (only if no metadata synonyms)
+        if not col_syns:
+            for col in _schema[table]:
+                hint = _get_column_hint(col)
+                if hint and any(w in hint.lower() for w in query_words if len(w) > 4):
+                    matched_tables.add(table)
+                    break
+
+    # Add FK-related tables conservatively:
+    # Only include a non-matched table if it directly connects two matched tables
+    # (bridge table). For single-table queries, no expansion.
+    directly_matched = set(matched_tables)
+    for table in _schema:
+        if table in directly_matched:
+            continue
+        # Check if this table is FK-connected to at least 2 directly matched tables
+        connected_to = set()
+        for r in _relationships:
+            if r["table"] == table and r["referenced_table"] in directly_matched:
+                connected_to.add(r["referenced_table"])
+            if r["referenced_table"] == table and r["table"] in directly_matched:
+                connected_to.add(r["table"])
+        if len(connected_to) >= 2:
+            matched_tables.add(table)
+
+    # Fallback: if nothing matched, return full schema
+    if not matched_tables:
+        return _schema_typed, _relationships
+
+    filtered_schema = {
+        t: cols for t, cols in _schema_typed.items() if t in matched_tables
+    }
+    filtered_rels = [
+        r
+        for r in _relationships
+        if r["table"] in matched_tables and r["referenced_table"] in matched_tables
+    ]
+
+    return filtered_schema, filtered_rels
+
+
+def get_schema_text(
+    schema_typed: dict[str, list[tuple[str, str]]] | None = None,
+    relationships: list[dict] | None = None,
+) -> str:
+    """Build schema text for the LLM prompt.
+
+    If schema_typed and relationships are provided, uses those (filtered).
+    Otherwise uses the full schema.
+    """
+    if schema_typed is None:
+        schema_typed = _schema_typed
+    if relationships is None:
+        relationships = _relationships
+
     lines = []
-    for table, columns in _schema_typed.items():
+    for table, columns in schema_typed.items():
         lines.append(f"Table: {table}")
         col_parts = []
         for name, dtype in columns:
@@ -74,9 +210,10 @@ def get_schema_text() -> str:
             else:
                 col_parts.append(f"{name} ({dtype})")
         lines.append(f"  Columns: {', '.join(col_parts)}")
-    if _relationships:
-        lines.append("\nRelationships:")
-        for r in _relationships:
+
+    if relationships:
+        lines.append("\nRelationships (use these for JOINs):")
+        for r in relationships:
             lines.append(
                 f"  {r['table']}.{r['column']} -> "
                 f"{r['referenced_table']}.{r['referenced_column']}"

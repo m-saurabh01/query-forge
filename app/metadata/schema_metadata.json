@@ -1,0 +1,173 @@
+{
+  "tables": {
+    "users": {
+      "description": "User accounts in the system",
+      "business_terms": ["user", "person", "account", "member", "people"],
+      "columns": {
+        "id": {"description": "Unique user identifier"},
+        "display_name": {
+          "description": "The user's full name",
+          "synonyms": ["name", "username", "full name"]
+        },
+        "email": {
+          "description": "User's email address",
+          "synonyms": ["email address", "mail"]
+        },
+        "password_hash": {"description": "Internal hashed password, do not select"},
+        "enabled": {
+          "description": "Whether the account is active (1=active, 0=disabled)",
+          "synonyms": ["active", "status"]
+        },
+        "deleted": {
+          "description": "Whether the record is soft-deleted",
+          "synonyms": ["removed", "archived"]
+        },
+        "signature": {"description": "User email signature text"},
+        "role": {
+          "description": "User role, e.g. 'ADMIN', 'USER'",
+          "synonyms": ["permission", "access level"]
+        }
+      }
+    },
+    "emails": {
+      "description": "Email messages sent by users",
+      "business_terms": ["email", "message", "mail", "correspondence"],
+      "columns": {
+        "id": {"description": "Unique email identifier"},
+        "sender_id": {"description": "FK to users.id — the user who sent the email"},
+        "subject": {
+          "description": "Email subject line",
+          "synonyms": ["title", "heading", "topic"]
+        },
+        "body_html": {
+          "description": "Email body content in HTML",
+          "synonyms": ["body", "content", "text"]
+        },
+        "thread_id": {
+          "description": "Groups emails into conversation threads",
+          "synonyms": ["conversation", "thread"]
+        },
+        "is_draft": {
+          "description": "Whether the email is a draft (1=draft, 0=sent)",
+          "synonyms": ["draft"]
+        },
+        "sender_deleted": {"description": "Whether the sender deleted this email"},
+        "read_receipt_requested": {"description": "Whether sender requested a read receipt"}
+      }
+    },
+    "email_recipients": {
+      "description": "Maps emails to their recipients (TO, CC, BCC)",
+      "business_terms": ["recipient", "receiver", "addressee", "to", "cc", "bcc"],
+      "columns": {
+        "id": {"description": "Unique recipient entry identifier"},
+        "email_id": {"description": "FK to emails.id"},
+        "user_id": {"description": "FK to users.id — the recipient user"},
+        "recipient_type": {
+          "description": "Type of recipient: 'TO', 'CC', or 'BCC'",
+          "synonyms": ["type", "to type", "cc type", "bcc type"]
+        },
+        "is_read": {
+          "description": "Whether the recipient has read the email",
+          "synonyms": ["read", "opened", "seen"]
+        },
+        "is_deleted": {
+          "description": "Whether the recipient deleted the email",
+          "synonyms": ["deleted", "removed"]
+        },
+        "is_starred": {
+          "description": "Whether the recipient starred/flagged the email",
+          "synonyms": ["starred", "flagged", "favorite", "important"]
+        },
+        "read_receipt_sent": {"description": "Whether a read receipt was sent back"},
+        "snoozed_until": {
+          "description": "Datetime until which the email is snoozed",
+          "synonyms": ["snoozed", "remind"]
+        }
+      }
+    },
+    "contacts": {
+      "description": "User contact list entries",
+      "business_terms": ["contact", "address book", "people"],
+      "columns": {
+        "id": {"description": "Unique contact identifier"},
+        "user_id": {"description": "FK to users.id — the user who owns this contact"},
+        "contact_email": {
+          "description": "Email address of the contact",
+          "synonyms": ["contact address"]
+        },
+        "is_favorite": {
+          "description": "Whether the contact is marked as favorite",
+          "synonyms": ["favorite", "starred", "preferred"]
+        }
+      }
+    },
+    "attachments": {
+      "description": "File attachments on emails",
+      "business_terms": ["attachment", "file", "document", "upload"],
+      "columns": {
+        "id": {"description": "Unique attachment identifier"},
+        "email_id": {"description": "FK to emails.id"},
+        "original_filename": {
+          "description": "The original file name of the attachment",
+          "synonyms": ["filename", "file name"]
+        },
+        "stored_filename": {"description": "Internal storage filename"},
+        "mime_type": {
+          "description": "File MIME type, e.g. 'application/pdf'",
+          "synonyms": ["file type", "format"]
+        },
+        "size_bytes": {
+          "description": "File size in bytes",
+          "synonyms": ["size", "file size"]
+        }
+      }
+    },
+    "feedback": {
+      "description": "User feedback entries",
+      "business_terms": ["feedback", "review", "comment", "rating"],
+      "columns": {
+        "id": {"description": "Unique feedback identifier"},
+        "type": {
+          "description": "Type/category of feedback",
+          "synonyms": ["category", "kind"]
+        }
+      }
+    },
+    "user_achievements": {
+      "description": "Achievements and badges earned by users",
+      "business_terms": ["achievement", "badge", "reward", "milestone"],
+      "columns": {
+        "id": {"description": "Unique achievement record identifier"},
+        "user_id": {"description": "FK to users.id"},
+        "current_progress": {
+          "description": "Progress toward unlocking the achievement",
+          "synonyms": ["progress", "completion"]
+        },
+        "notified": {
+          "description": "Whether user was notified of the achievement",
+          "synonyms": ["notification"]
+        }
+      }
+    }
+  },
+  "relationships": {
+    "emails.sender_id -> users.id": {
+      "description": "The user who sent the email"
+    },
+    "email_recipients.email_id -> emails.id": {
+      "description": "Links a recipient entry to the email it belongs to"
+    },
+    "email_recipients.user_id -> users.id": {
+      "description": "The user who received the email"
+    },
+    "contacts.user_id -> users.id": {
+      "description": "The user who owns this contact"
+    },
+    "attachments.email_id -> emails.id": {
+      "description": "The email this file is attached to"
+    },
+    "user_achievements.user_id -> users.id": {
+      "description": "The user who earned this achievement"
+    }
+  }
+}
