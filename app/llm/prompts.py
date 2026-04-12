@@ -1,4 +1,4 @@
-from app.dialect import get_dialect, format_limit, format_date_cast
+from app.db.dialect import get_dialect, format_limit, format_date_cast
 
 
 def _build_prompt_template(dialect: dict) -> str:
@@ -61,7 +61,6 @@ def build_few_shot_examples(schema: dict[str, list[str]], dialect_key: str = "my
     # Example 3: if there's a second table, show a join/subquery example
     if len(tables) >= 2:
         t2 = tables[1]
-        # Find a FK relationship between t1 and t2 for a realistic example
         examples.append(
             f"Question: show {t1} who have {t2}\n"
             f"SQL: SELECT DISTINCT {t1}.* FROM {t1} "
@@ -98,5 +97,14 @@ def build_few_shot_examples(schema: dict[str, list[str]], dialect_key: str = "my
                 f"SQL: SELECT * FROM {t} ORDER BY {dc} DESC {limit_50};"
             )
             break
+
+    # Example 7: recipient_type filtering (TO/CC/BCC) — critical for email queries
+    if "emails" in schema and "email_recipients" in schema:
+        examples.append(
+            "Question: show all emails which have BCC recipients\n"
+            "SQL: SELECT DISTINCT emails.* FROM emails "
+            "INNER JOIN email_recipients ON emails.id = email_recipients.email_id "
+            f"WHERE email_recipients.recipient_type = 'BCC' {limit_50};"
+        )
 
     return "\n\n".join(examples)

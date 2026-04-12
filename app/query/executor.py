@@ -1,6 +1,6 @@
 import logging
 
-from app.db import execute_query
+from app.db.pool import execute_query
 
 logger = logging.getLogger(__name__)
 

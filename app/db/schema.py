@@ -1,7 +1,7 @@
 import logging
 
 from app.config import settings
-from app.db import get_pool
+from app.db.pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -87,14 +87,40 @@ def get_schema_text() -> str:
 # Semantic hints: map column name patterns to user-friendly descriptions.
 # Helps the LLM pick the right column when the user says "name", "email", etc.
 _COLUMN_HINTS = {
+    # users
     "display_name": "this is the name",
-    "contact_email": "this is the email address of the contact",
-    "body_html": "email body content",
-    "sender_id": "user who sent the email",
     "password_hash": "internal, do not select",
+    "enabled": "whether the user account is active",
+    "deleted": "whether the record is soft-deleted",
+    "signature": "user email signature text",
+    "role": "user role, e.g. 'ADMIN', 'USER'",
+    # emails
+    "sender_id": "FK to users.id — the user who sent the email",
+    "body_html": "email body content",
+    "thread_id": "groups emails into conversation threads",
+    "is_draft": "whether the email is a draft (1=draft, 0=sent)",
+    "sender_deleted": "whether the sender deleted this email",
+    "read_receipt_requested": "whether sender requested a read receipt",
+    # email_recipients — IMPORTANT for TO/CC/BCC queries
+    "recipient_type": "values: 'TO', 'CC', 'BCC' — the type of recipient",
+    "is_read": "whether the recipient has read the email",
+    "is_deleted": "whether the recipient deleted the email",
+    "is_starred": "whether the recipient starred/flagged the email",
+    "read_receipt_sent": "whether a read receipt was sent back",
+    "snoozed_until": "datetime until which the email is snoozed",
+    # contacts
+    "contact_email": "this is the email address of the contact",
     "is_favorite": "whether the contact is marked as favorite",
-    "read_receipt_sent": "boolean: whether read receipt was sent",
-    "sender_deleted": "boolean: whether sender deleted this email",
+    # attachments
+    "original_filename": "the original file name of the attachment",
+    "stored_filename": "internal storage filename",
+    "mime_type": "file MIME type, e.g. 'application/pdf'",
+    "size_bytes": "file size in bytes",
+    # feedback
+    "type": "type/category of feedback",
+    # user_achievements
+    "current_progress": "progress toward unlocking the achievement",
+    "notified": "whether user was notified of the achievement",
 }
 
 
