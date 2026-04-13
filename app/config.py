@@ -32,6 +32,18 @@ class Settings(BaseSettings):
     cache_max_size: int = 256
     cache_ttl_seconds: int = 300
 
+    # Input validation
+    max_query_length: int = 500
+
+    # Rate limiting (requests per IP per minute)
+    rate_limit_rpm: int = 20
+
+    # Debug endpoint
+    debug_enabled: bool = True
+
+    # Admin endpoint secret (empty = no auth on admin routes)
+    admin_secret: str = ""
+
     class Config:
         env_file = ".env"
         protected_namespaces = ("settings_",)

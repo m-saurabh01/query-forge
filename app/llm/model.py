@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -24,6 +25,15 @@ def load_model():
 
 def is_model_loaded() -> bool:
     return _model is not None
+
+
+def count_tokens(text: str) -> int:
+    """Count tokens using the loaded model's tokenizer.
+    Returns -1 if model is not loaded (graceful fallback).
+    """
+    if _model is None:
+        return -1
+    return len(_model.tokenize(text.encode("utf-8")))
 
 
 def generate(prompt: str, max_tokens: int = 512, temperature: float = 0.1) -> str:
@@ -68,3 +78,9 @@ def generate_with_retry(
                 temperature = min(temperature + 0.1, 0.5)
 
     raise RuntimeError(f"LLM generation failed after {max_retries} attempts: {last_error}")
+
+
+async def generate_async(prompt: str, max_tokens: int = 512, temperature: float = 0.1) -> str:
+    """Non-blocking wrapper — runs LLM inference in a thread pool so the
+    async event loop stays responsive for health checks, static files, etc."""
+    return await asyncio.to_thread(generate, prompt, max_tokens, temperature)

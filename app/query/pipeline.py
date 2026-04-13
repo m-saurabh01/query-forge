@@ -8,7 +8,7 @@ from cachetools import TTLCache
 from app.config import settings
 from app.db.schema import get_schema, get_schema_text, filter_schema_for_query
 from app.llm.prompts import get_prompt_template, build_few_shot_examples, build_error_feedback_prompt
-from app.llm.model import generate
+from app.llm.model import generate_async, count_tokens
 from app.metadata.loader import get_metadata, get_synonyms
 from app.metadata.semantic import classify_intent, reorder_examples_by_intent, build_semantic_schema_text
 from app.metrics import metrics
@@ -153,11 +153,24 @@ async def process_query(user_query: str, request_id: str | None = None, debug: b
             attempt_info["temperature"] = temperature
             attempt_info["prompt"] = prompt
 
+            # Token counting — warn if prompt may be truncated
+            prompt_tokens = count_tokens(prompt)
+            attempt_info["prompt_tokens"] = prompt_tokens
+            if prompt_tokens > 0:
+                available = settings.n_ctx - 256  # reserve for generation
+                if prompt_tokens > available:
+                    logger.warning(
+                        "%s Prompt (%d tokens) exceeds context window (%d). "
+                        "Output may be truncated.",
+                        log_ctx, prompt_tokens, settings.n_ctx,
+                    )
+                    _t("token_warning", f"Prompt {prompt_tokens} tokens exceeds {available} available")
+
             logger.info(
-                "%s Generating SQL (attempt %d) for: %s",
-                log_ctx, attempt, user_query,
+                "%s Generating SQL (attempt %d, %d tokens) for: %s",
+                log_ctx, attempt, prompt_tokens, user_query,
             )
-            raw = generate(prompt, max_tokens=256, temperature=temperature)
+            raw = await generate_async(prompt, max_tokens=256, temperature=temperature)
             attempt_info["raw_llm_response"] = raw
 
             sql = extract_sql(raw)
@@ -245,11 +258,15 @@ async def process_query(user_query: str, request_id: str | None = None, debug: b
     logger.info("%s Pipeline completed in %.2fs", log_ctx, elapsed)
     _t("elapsed_seconds", elapsed)
 
+    # Build natural-language explanation
+    row_count = len(data["rows"])
+    explanation = await _build_explanation(sql, row_count, elapsed)
+
     result = {
         "request_id": request_id,
         "sql": sql,
         "data": data,
-        "explanation": f"Query returned {len(data['rows'])} row(s) in {elapsed}s.",
+        "explanation": explanation,
         "error": None,
     }
 
@@ -261,3 +278,26 @@ async def process_query(user_query: str, request_id: str | None = None, debug: b
     _cache[cache_key] = cache_result
 
     return result
+
+
+async def _build_explanation(sql: str, row_count: int, elapsed: float) -> str:
+    """Generate a short NL explanation of what the SQL does.
+
+    Runs a lightweight LLM call in the background thread. Falls back to a
+    simple row-count string if the call fails or times out.
+    """
+    fallback = f"Returned {row_count} row(s) in {elapsed}s."
+    try:
+        prompt = (
+            "Explain this SQL query in one plain-English sentence "
+            "(no SQL, no code, no quotes):\n"
+            f"{sql}\n"
+            "Explanation:"
+        )
+        raw = await generate_async(prompt, max_tokens=80, temperature=0.1)
+        explanation = raw.strip().split("\n")[0].strip()
+        if explanation:
+            return f"{explanation}  ({row_count} row(s), {elapsed}s)"
+    except Exception as e:
+        logger.debug("Explanation generation failed: %s", e)
+    return fallback
