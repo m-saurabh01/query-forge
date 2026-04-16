@@ -12,6 +12,13 @@ class Settings(BaseSettings):
     n_ctx: int = 2048
     n_gpu_layers: int = 0
 
+    # LLM backend: "llamacpp" (load GGUF locally) or "ollama" (HTTP API)
+    llm_backend: str = "llamacpp"
+
+    # Ollama settings (only used when llm_backend=ollama)
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "mistral"
+
     db_dialect: str = "mysql"
 
     # Metadata

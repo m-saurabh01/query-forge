@@ -1,53 +1,61 @@
+"""LLM abstraction layer.
+
+Dispatches to either llama-cpp-python (local GGUF) or Ollama (HTTP API)
+based on ``settings.llm_backend``.  All other modules import from here —
+the backend switch is transparent to the rest of the codebase.
+"""
+
 import asyncio
+import importlib
 import logging
 import time
-
-from llama_cpp import Llama
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_model: Llama | None = None
+# ── Backend dispatch ────────────────────────────────────────────────────
+# Each backend module must expose:
+#   load_model(), is_model_loaded(), count_tokens(text), generate(prompt, max_tokens, temperature)
 
+_backend = None  # module reference, set in load_model()
+
+
+def _get_backend():
+    global _backend
+    if _backend is not None:
+        return _backend
+
+    name = settings.llm_backend.lower().strip()
+    if name == "llamacpp":
+        _backend = importlib.import_module("app.llm.llamacpp_backend")
+    elif name == "ollama":
+        _backend = importlib.import_module("app.llm.ollama_backend")
+    else:
+        raise ValueError(
+            f"Unknown LLM_BACKEND '{settings.llm_backend}'. "
+            "Use 'llamacpp' or 'ollama'."
+        )
+    logger.info("LLM backend: %s", name)
+    return _backend
+
+
+# ── Public API (unchanged signatures) ──────────────────────────────────
 
 def load_model():
-    global _model
-    logger.info("Loading LLM from %s ...", settings.model_path)
-    _model = Llama(
-        model_path=settings.model_path,
-        n_ctx=settings.n_ctx,
-        n_gpu_layers=settings.n_gpu_layers,
-        verbose=False,
-    )
-    logger.info("LLM loaded successfully")
+    _get_backend().load_model()
 
 
 def is_model_loaded() -> bool:
-    return _model is not None
+    return _get_backend().is_model_loaded()
 
 
 def count_tokens(text: str) -> int:
-    """Count tokens using the loaded model's tokenizer.
-    Returns -1 if model is not loaded (graceful fallback).
-    """
-    if _model is None:
-        return -1
-    return len(_model.tokenize(text.encode("utf-8")))
+    return _get_backend().count_tokens(text)
 
 
 def generate(prompt: str, max_tokens: int = 512, temperature: float = 0.1) -> str:
-    if _model is None:
-        raise RuntimeError("LLM not loaded. Call load_model() first.")
-    output = _model(
-        prompt,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        top_p=0.9,
-        repeat_penalty=1.1,
-        stop=["```", "\n\n\n", "###", "Question:", "Question "],
-    )
-    return output["choices"][0]["text"].strip()
+    return _get_backend().generate(prompt, max_tokens=max_tokens, temperature=temperature)
 
 
 def generate_with_retry(
